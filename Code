@@ -1,0 +1,107 @@
+let interval_ms = 60000; // 1 minute
+let co2_par_kwh = 0.06;
+
+// État courant
+let energie_produite_wh = 0;
+let energie_injectee_wh = 0;
+let energie_autoconsommee_wh = 0;
+let economie_eur = 0;
+let co2_kg = 0;
+
+// Zone Tempo par défaut et topic MQTT
+let tempoZone = "Bleu";
+let mqttTopic = "tempo/jour_couleur";
+
+// Souscription au topic Tempo
+MQTT.subscribe(mqttTopic, function (topic, message) {
+  try {
+    if (message && ["Bleu", "Blanc", "Rouge"].includes(message)) {
+      tempoZone = message;
+      print("📡 Zone Tempo reçue via MQTT :", tempoZone);
+    } else {
+      print("⚠️ Message invalide reçu via MQTT : ", message);
+    }
+  } catch (error) {
+    print("❌ Erreur MQTT :", error);
+  }
+});
+
+// Tarifs Tempo
+function getTarifTempo(zone) {
+  const tarifsTempo = {
+    Bleu:  { HP: 0.1552, HC: 0.1288 },
+    Blanc: { HP: 0.1792, HC: 0.1447 },
+    Rouge: { HP: 0.6586, HC: 0.1518 }
+  };
+
+  let now = new Date();
+  let heure = now.getHours();
+  let isHC = (heure >= 22 || heure < 6);
+
+  return isHC ? tarifsTempo[zone].HC : tarifsTempo[zone].HP;
+}
+
+// Calcul des économies et CO2
+function calculerEconomiesEtCO2(energie) {
+  let tarif = getTarifTempo(tempoZone);
+  let economie = (energie / 1000) * tarif;
+  let co2 = (energie / 1000) * co2_par_kwh;
+
+  print("🔍 Calcul économie/CO₂ : Energie=", energie.toFixed(2), "Wh | Tarif=", tarif.toFixed(4), "€/kWh");
+  return { economie: economie, co2: co2 };
+}
+
+// Timer principal
+Timer.set(interval_ms, true, function () {
+  let emStatus = Shelly.getComponentStatus("em:0");
+  if (!emStatus) {
+    print("❌ em:0 non disponible");
+    return;
+  }
+
+  let solarPower = emStatus.a_act_power || 0;
+  let gridPower = emStatus.c_act_power || 0;
+
+  let energie_interval = solarPower * interval_ms / 1000 / 3600;
+  energie_produite_wh += energie_interval;
+
+  if (gridPower < 0) {
+    let injectee = Math.abs(gridPower) * interval_ms / 1000 / 3600;
+    energie_injectee_wh += injectee;
+  } else {
+    let auto = energie_interval;
+    energie_autoconsommee_wh += auto;
+
+    let resultats = calculerEconomiesEtCO2(auto);
+    economie_eur += resultats.economie;
+    co2_kg += resultats.co2;
+  }
+
+  // Affichage
+  print("====== Suivi énergie (Tempo) ======");
+  print("📅 Zone Tempo :", tempoZone);
+  print("☀️  Solaire :", solarPower.toFixed(1), "W");
+  print("⚡️ Réseau :", gridPower.toFixed(1), "W");
+  print("🔋 Produite :", energie_produite_wh.toFixed(2), "Wh");
+  print("🏠 Autoconsommée :", energie_autoconsommee_wh.toFixed(2), "Wh");
+  print("🔁 Injectée :", energie_injectee_wh.toFixed(2), "Wh");
+  print("💰 Économie :", economie_eur.toFixed(3), "€");
+  print("🌱 CO₂ évité :", co2_kg.toFixed(3), "kg");
+  print("===================================");
+});
+
+// Réinitialisation quotidienne
+let jourPrecedent = (new Date()).getDate();
+
+Timer.set(3600000, true, function () {  // Vérifie chaque heure
+  let now = new Date();
+  if (now.getDate() !== jourPrecedent) {
+    energie_produite_wh = 0;
+    energie_injectee_wh = 0;
+    energie_autoconsommee_wh = 0;
+    economie_eur = 0;
+    co2_kg = 0;
+    jourPrecedent = now.getDate();
+    print("🔄 Réinitialisation journalière.");
+  }
+});
